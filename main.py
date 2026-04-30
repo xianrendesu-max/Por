@@ -2,6 +2,7 @@ from flask import Flask, request, Response, jsonify
 import yt_dlp
 import requests
 import os
+import re
 
 app = Flask(__name__)
 
@@ -21,28 +22,31 @@ def get_info():
         'user_agent': USER_AGENT,
         'referer': 'https://www.pornhub.com/',
         'nocheckcertificate': True,
-        # プレイリスト全体を強制的に取得するための設定
-        'noplaylist': True,
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=False)
             
-            # 1. 最優先: manifest_url (これが master.m3u8 に直結します)
-            master_url = info.get('manifest_url') or info.get('url')
+            # 元となるURLを取得
+            raw_url = info.get('manifest_url') or info.get('url')
             
-            # 2. formatsの中から 'hls' かつ 'master' という文字列を含むものを再検索
-            formats = info.get('formats', [])
-            all_m3u8 = [f['url'] for f in formats if 'm3u8' in f.get('url', '').lower()]
+            # --- URLの強制変換ロジック ---
+            # 1. クエリパラメータ（?以降）を削除
+            clean_url = raw_url.split('?')[0]
             
-            # 特定のパターン (master.m3u8) を含むものを優先抽出
-            best_master = next((u for u in all_m3u8 if 'master.m3u8' in u), master_url)
+            # 2. ホスト名を ev-h から iv-h に置換
+            # (もし他のサブドメインの場合も考慮して正規表現で置換)
+            final_url = re.sub(r'https://[a-z0-9-]+.phncdn.com', 'https://iv-h.phncdn.com', clean_url)
+            
+            # 3. ファイル名が index-... になっている場合 master.m3u8 に書き換え
+            if 'master.m3u8' not in final_url:
+                final_url = re.sub(r'/[^/]+\.m3u8$', '/master.m3u8', final_url)
 
             return jsonify({
                 "title": info.get('title'),
-                "master_url": best_master,
-                "all_m3u8_variants": all_m3u8
+                "target_url": final_url,
+                "original_raw_url": raw_url
             })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -73,3 +77,4 @@ def proxy_video():
 
 if __name__ == "__main__":
     app.run()
+
