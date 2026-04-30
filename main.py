@@ -21,35 +21,42 @@ def get_info():
         'user_agent': USER_AGENT,
         'referer': 'https://www.pornhub.com/',
         'nocheckcertificate': True,
-        'format': 'best', # 最良の画質を選択
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=False)
             
-            # m3u8形式のURLを優先的に探す
-            manifest_url = info.get('url') # 通常、ここが直接のストリームURL
+            # master.m3u8 のURLは通常 'manifest_url' フィールドに格納されています
+            master_url = info.get('manifest_url')
             
-            # formatsリストの中から .m3u8 を含むものを探す
-            formats = info.get('formats', [])
-            m3u8_urls = [f['url'] for f in formats if '.m3u8' in f.get('url', '')]
-            
+            # もし manifest_url が空の場合、formatsから探す
+            if not master_url:
+                for f in info.get('formats', []):
+                    if 'master.m3u8' in f.get('url', ''):
+                        master_url = f['url']
+                        break
+
             return jsonify({
                 "title": info.get('title'),
-                "m3u8_url": m3u8_urls[0] if m3u8_urls else manifest_url,
-                "all_formats": formats # 必要に応じて全ての形式を確認可能
+                "master_m3u8": master_url,
+                "fallback_url": info.get('url') # これが index-v1-a1.m3u8 になることが多い
             })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# 動画データそのものをプロキシ経由で中継する
 @app.route('/proxy_video')
 def proxy_video():
     stream_url = request.args.get('stream_url')
     if not stream_url:
         return "Missing stream_url", 400
 
-    proxies = {"http": PROXY_URL, "https": PROXY_URL}
+    proxies = {
+        "http": PROXY_URL,
+        "https": PROXY_URL,
+    }
+    
     headers = {
         'User-Agent': USER_AGENT,
         'Referer': 'https://www.pornhub.com/',
@@ -59,13 +66,21 @@ def proxy_video():
     req = requests.get(stream_url, proxies=proxies, headers=headers, stream=True, verify=False, timeout=15)
     
     excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
-    response_headers = [(name, value) for (name, value) in req.raw.headers.items() if name.lower() not in excluded_headers]
+    response_headers = [
+        (name, value) for (name, value) in req.raw.headers.items()
+        if name.lower() not in excluded_headers
+    ]
 
     def generate():
         for chunk in req.iter_content(chunk_size=65536):
             yield chunk
 
-    return Response(generate(), status=req.status_code, content_type=req.headers.get('Content-Type'), headers=response_headers)
+    return Response(
+        generate(),
+        status=req.status_code,
+        content_type=req.headers.get('Content-Type'),
+        headers=response_headers
+    )
 
 if __name__ == "__main__":
     app.run()
