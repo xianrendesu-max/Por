@@ -21,42 +21,39 @@ def get_info():
         'user_agent': USER_AGENT,
         'referer': 'https://www.pornhub.com/',
         'nocheckcertificate': True,
+        # プレイリスト全体を強制的に取得するための設定
+        'noplaylist': True,
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=False)
             
-            # master.m3u8 のURLは通常 'manifest_url' フィールドに格納されています
-            master_url = info.get('manifest_url')
+            # 1. 最優先: manifest_url (これが master.m3u8 に直結します)
+            master_url = info.get('manifest_url') or info.get('url')
             
-            # もし manifest_url が空の場合、formatsから探す
-            if not master_url:
-                for f in info.get('formats', []):
-                    if 'master.m3u8' in f.get('url', ''):
-                        master_url = f['url']
-                        break
+            # 2. formatsの中から 'hls' かつ 'master' という文字列を含むものを再検索
+            formats = info.get('formats', [])
+            all_m3u8 = [f['url'] for f in formats if 'm3u8' in f.get('url', '').lower()]
+            
+            # 特定のパターン (master.m3u8) を含むものを優先抽出
+            best_master = next((u for u in all_m3u8 if 'master.m3u8' in u), master_url)
 
             return jsonify({
                 "title": info.get('title'),
-                "master_m3u8": master_url,
-                "fallback_url": info.get('url') # これが index-v1-a1.m3u8 になることが多い
+                "master_url": best_master,
+                "all_m3u8_variants": all_m3u8
             })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# 動画データそのものをプロキシ経由で中継する
 @app.route('/proxy_video')
 def proxy_video():
     stream_url = request.args.get('stream_url')
     if not stream_url:
         return "Missing stream_url", 400
 
-    proxies = {
-        "http": PROXY_URL,
-        "https": PROXY_URL,
-    }
-    
+    proxies = {"http": PROXY_URL, "https": PROXY_URL}
     headers = {
         'User-Agent': USER_AGENT,
         'Referer': 'https://www.pornhub.com/',
@@ -66,21 +63,13 @@ def proxy_video():
     req = requests.get(stream_url, proxies=proxies, headers=headers, stream=True, verify=False, timeout=15)
     
     excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
-    response_headers = [
-        (name, value) for (name, value) in req.raw.headers.items()
-        if name.lower() not in excluded_headers
-    ]
+    response_headers = [(name, value) for (name, value) in req.raw.headers.items() if name.lower() not in excluded_headers]
 
     def generate():
         for chunk in req.iter_content(chunk_size=65536):
             yield chunk
 
-    return Response(
-        generate(),
-        status=req.status_code,
-        content_type=req.headers.get('Content-Type'),
-        headers=response_headers
-    )
+    return Response(generate(), status=req.status_code, content_type=req.headers.get('Content-Type'), headers=response_headers)
 
 if __name__ == "__main__":
     app.run()
