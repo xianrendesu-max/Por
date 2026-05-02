@@ -1,3 +1,4 @@
-flask
+fastapi
+pornhub-api
 yt-dlp
-requests
+uvicorn
