@@ -28,17 +28,24 @@ def get_info():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=False)
             
-            # 元となるURLを取得
+            # 元となるURL（トークン付き）を取得
             raw_url = info.get('manifest_url') or info.get('url')
             
             # --- URLの強制変換ロジック（修正版） ---
-            # 1. ホスト名を [任意].phncdn.com から iv-h.phncdn.com に置換（クエリは維持）
+            # 1. ホスト名を iv-h.phncdn.com に置換。?以降のトークンは維持される。
             final_url = re.sub(r'https://[a-z0-9-]+.phncdn.com', 'https://iv-h.phncdn.com', raw_url)
             
-            # 2. ファイル名が index-... になっている場合、パス部分のみ master.m3u8 に書き換え
-            if 'master.m3u8' not in final_url.split('?')[0]:
-                # パス末尾の .m3u8 ファイル名を master.m3u8 に置換。? 以降のパラメータは保持。
-                final_url = re.sub(r'/([^/]+)\.m3u8', '/master.m3u8', final_url, count=1)
+            # 2. ファイル名部分だけを master.m3u8 に書き換え（クエリパラメータを壊さない）
+            # URLをパス部分とクエリ部分に分けて処理
+            if '?' in final_url:
+                base_path, query_string = final_url.split('?', 1)
+                # パス末尾が master.m3u8 でない場合のみ置換
+                if not base_path.endswith('master.m3u8'):
+                    base_path = re.sub(r'/[^/]+\.m3u8$', '/master.m3u8', base_path)
+                final_url = f"{base_path}?{query_string}"
+            else:
+                if not final_url.endswith('master.m3u8'):
+                    final_url = re.sub(r'/[^/]+\.m3u8$', '/master.m3u8', final_url)
 
             return jsonify({
                 "title": info.get('title'),
@@ -61,6 +68,7 @@ def proxy_video():
         'Range': request.headers.get('Range', '')
     }
 
+    # ストリームとして取得
     req = requests.get(stream_url, proxies=proxies, headers=headers, stream=True, verify=False, timeout=15)
     
     excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
