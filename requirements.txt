@@ -2,3 +2,4 @@ fastapi
 pornhub-api
 yt-dlp
 uvicorn
+pydantic<2.0.0
