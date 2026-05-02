@@ -1,90 +1,134 @@
-from flask import Flask, request, Response, jsonify
+from fastapi import FastAPI, Query, HTTPException
+from pornhub_api import PornhubApi
 import yt_dlp
-import requests
 import os
-import re
-from urllib.parse import urljoin, urlparse
+from fastapi.responses import JSONResponse
 
-app = Flask(__name__)
+app = FastAPI()
+api = PornhubApi()
 
-# 指定されたプロキシ
-PROXY_URL = "http://ytproxy-siawaseok.duckdns.org:3007"
-USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+# --- FastAPIによる検索APIセクション ---
 
-@app.route('/get_info')
-def get_info():
-    video_url = request.args.get('url')
-    if not video_url:
-        return jsonify({"error": "Missing url"}), 400
+@app.get("/search")
+def search_videos(
+    q: str = Query(..., description="検索キーワード"),
+    limit: int = Query(10, description="取得件数"),
+    page: int = Query(1, description="ページ番号")
+):
+    # 動画を検索（並び順や期間などのオプションも設定可能）
+    # ordering="mostviewed", period="weekly" など
+    results = api.search.search_videos(
+        q, 
+        page=page
+    )
+    
+    video_list = []
+    # 検索結果から必要な情報だけを抽出
+    for i, video in enumerate(results.videos):
+        if i >= limit:
+            break
+        video_list.append({
+            "title": video.title,
+            "video_id": video.video_id,
+            "url": video.url,
+            "duration": video.duration,
+            "views": video.views,
+            "rating": video.rating,
+            "thumbnail": video.default_thumb,
+        })
+
+    return {
+        "keyword": q,
+        "count": len(video_list),
+        "results": video_list
+    }
+
+# --- yt-dlpによる情報取得・ストリームAPIセクション ---
+
+@app.get("/")
+def index():
+    return {
+        "status": "online",
+        "message": "yt-dlp JSON API for Pornhub is running",
+        "proxy": "active"
+    }
+
+@app.get("/get_info")
+def get_info(url: str = Query(..., alias="url")):
+    # 指定されたプロキシサーバー
+    proxy_url = "http://ytproxy-siawaseok.duckdns.org:3007"
+
+    # yt-dlpのオプション設定
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'proxy': proxy_url,
+        'nocheckcertificate': True,
+        'format': 'best', # 最良の画質を選択
+        # Pornhubのブロックを回避するための偽装ヘッダー
+        'referer': 'https://www.pornhub.com/',
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ja,en-US;q=0.7,en;q=0.3',
+        }
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # 情報を抽出（download=Falseでメタデータのみ取得）
+            info = ydl.extract_info(url, download=False)
+            
+            # 抽出した情報をJSONとして返却
+            return info
+            
+    except Exception as e:
+        # エラー発生時の詳細を返却
+        raise HTTPException(status_code=500, detail={
+            "error": "Failed to extract video information",
+            "details": str(e)
+        })
+
+@app.get("/api/v1/stream/{video_id}")
+def get_stream_info(video_id: str):
+    video_url = f"https://www.pornhub.com/view_video.php?viewkey={video_id}"
+    proxy_url = "http://ytproxy-siawaseok.duckdns.org:3007"
 
     ydl_opts = {
         'quiet': True,
-        'proxy': PROXY_URL,
-        'user_agent': USER_AGENT,
-        'referer': 'https://www.pornhub.com/',
+        'no_warnings': True,
+        'proxy': proxy_url,
         'nocheckcertificate': True,
+        'format': 'best',
+        'referer': 'https://www.pornhub.com/',
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        }
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=False)
-            raw_url = info.get('manifest_url') or info.get('url')
             
-            # ホスト名を iv-h に置換し、master.m3u8 に書き換える
-            final_url = re.sub(r'https://[a-z0-9-]+.phncdn.com', 'https://iv-h.phncdn.com', raw_url)
-            if '?' in final_url:
-                base_path, query = final_url.split('?', 1)
-                if not base_path.endswith('master.m3u8'):
-                    base_path = re.sub(r'/[^/]+\.m3u8$', '/master.m3u8', base_path)
-                final_url = f"{base_path}?{query}"
+            # HLSストリームURL、タイトル、サムネイルを抽出して返却
+            return {
+                "title": info.get("title"),
+                "url": info.get("url"), # HLSストリームURL
+                "thumbnail": info.get("thumbnail"),
+                "duration": info.get("duration"),
+                "uploader": info.get("uploader")
+            }
             
-            # ブラウザで直接開くための proxy_video 経由のURLを生成
-            # (Flaskサーバーのホスト名に合わせて適宜変更してください)
-            proxy_ready_url = f"/proxy_video?stream_url={final_url}"
-
-            return jsonify({
-                "title": info.get('title'),
-                "target_url": final_url,
-                "proxy_url": proxy_ready_url,
-                "original_raw_url": raw_url
-            })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        raise HTTPException(status_code=500, detail={
+            "error": "Failed to extract stream information",
+            "details": str(e)
+        })
 
-@app.route('/proxy_video')
-def proxy_video():
-    stream_url = request.args.get('stream_url')
-    if not stream_url:
-        return "Missing stream_url", 400
-
-    proxies = {"http": PROXY_URL, "https": PROXY_URL}
-    headers = {
-        'User-Agent': USER_AGENT,
-        'Referer': 'https://www.pornhub.com/',
-    }
-
-    req = requests.get(stream_url, proxies=proxies, headers=headers, verify=False, timeout=15)
-    
-    # m3u8ファイルの場合、中身のURLをすべてプロキシ経由に書き換える
-    if "application/vnd.apple.mpegurl" in req.headers.get('Content-Type', '') or stream_url.split('?')[0].endswith('.m3u8'):
-        content = req.text
-        lines = content.split('\n')
-        new_lines = []
-        for line in lines:
-            if line.startswith('#') or not line.strip():
-                new_lines.append(line)
-            else:
-                # 相対パスや絶対パスをフルURLに変換し、さらにこの proxy_video を通すように書き換え
-                full_url = urljoin(stream_url, line.strip())
-                new_lines.append(f"/proxy_video?stream_url={full_url}")
-        
-        return Response('\n'.join(new_lines), content_type="application/vnd.apple.mpegurl")
-
-    # 動画セグメント（.ts）などのバイナリデータはそのまま流す
-    excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
-    response_headers = [(name, value) for (name, value) in req.raw.headers.items() if name.lower() not in excluded_headers]
-
-    return Response(req.content, status=req.status_code, content_type=req.headers.get('Content-Type'), headers=response_headers)
-
+# Vercelデプロイ用: ハンドラとしてappを公開
+# ローカル実行時のためのブロック
 if __name__ == "__main__":
-    app.run(port=5000)
+    import uvicorn
+    # Renderなどの環境変数PORTに対応
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
