@@ -3,6 +3,7 @@ import yt_dlp
 import requests
 import os
 import re
+from urllib.parse import urljoin, urlparse
 
 app = Flask(__name__)
 
@@ -27,29 +28,24 @@ def get_info():
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=False)
-            
-            # 元となるURL（トークン付き）を取得
             raw_url = info.get('manifest_url') or info.get('url')
             
-            # --- URLの強制変換ロジック（修正版） ---
-            # 1. ホスト名を iv-h.phncdn.com に置換。?以降のトークンは維持される。
+            # ホスト名を iv-h に置換し、master.m3u8 に書き換える
             final_url = re.sub(r'https://[a-z0-9-]+.phncdn.com', 'https://iv-h.phncdn.com', raw_url)
-            
-            # 2. ファイル名部分だけを master.m3u8 に書き換え（クエリパラメータを壊さない）
-            # URLをパス部分とクエリ部分に分けて処理
             if '?' in final_url:
-                base_path, query_string = final_url.split('?', 1)
-                # パス末尾が master.m3u8 でない場合のみ置換
+                base_path, query = final_url.split('?', 1)
                 if not base_path.endswith('master.m3u8'):
                     base_path = re.sub(r'/[^/]+\.m3u8$', '/master.m3u8', base_path)
-                final_url = f"{base_path}?{query_string}"
-            else:
-                if not final_url.endswith('master.m3u8'):
-                    final_url = re.sub(r'/[^/]+\.m3u8$', '/master.m3u8', final_url)
+                final_url = f"{base_path}?{query}"
+            
+            # ブラウザで直接開くための proxy_video 経由のURLを生成
+            # (Flaskサーバーのホスト名に合わせて適宜変更してください)
+            proxy_ready_url = f"/proxy_video?stream_url={final_url}"
 
             return jsonify({
                 "title": info.get('title'),
                 "target_url": final_url,
+                "proxy_url": proxy_ready_url,
                 "original_raw_url": raw_url
             })
     except Exception as e:
@@ -65,20 +61,30 @@ def proxy_video():
     headers = {
         'User-Agent': USER_AGENT,
         'Referer': 'https://www.pornhub.com/',
-        'Range': request.headers.get('Range', '')
     }
 
-    # ストリームとして取得
-    req = requests.get(stream_url, proxies=proxies, headers=headers, stream=True, verify=False, timeout=15)
+    req = requests.get(stream_url, proxies=proxies, headers=headers, verify=False, timeout=15)
     
+    # m3u8ファイルの場合、中身のURLをすべてプロキシ経由に書き換える
+    if "application/vnd.apple.mpegurl" in req.headers.get('Content-Type', '') or stream_url.split('?')[0].endswith('.m3u8'):
+        content = req.text
+        lines = content.split('\n')
+        new_lines = []
+        for line in lines:
+            if line.startswith('#') or not line.strip():
+                new_lines.append(line)
+            else:
+                # 相対パスや絶対パスをフルURLに変換し、さらにこの proxy_video を通すように書き換え
+                full_url = urljoin(stream_url, line.strip())
+                new_lines.append(f"/proxy_video?stream_url={full_url}")
+        
+        return Response('\n'.join(new_lines), content_type="application/vnd.apple.mpegurl")
+
+    # 動画セグメント（.ts）などのバイナリデータはそのまま流す
     excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
     response_headers = [(name, value) for (name, value) in req.raw.headers.items() if name.lower() not in excluded_headers]
 
-    def generate():
-        for chunk in req.iter_content(chunk_size=65536):
-            yield chunk
-
-    return Response(generate(), status=req.status_code, content_type=req.headers.get('Content-Type'), headers=response_headers)
+    return Response(req.content, status=req.status_code, content_type=req.headers.get('Content-Type'), headers=response_headers)
 
 if __name__ == "__main__":
-    app.run()
+    app.run(port=5000)
