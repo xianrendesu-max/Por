@@ -31,17 +31,14 @@ def get_info():
             # 元となるURLを取得
             raw_url = info.get('manifest_url') or info.get('url')
             
-            # --- URLの強制変換ロジック ---
-            # 1. クエリパラメータ（?以降）を削除
-            clean_url = raw_url.split('?')[0]
+            # --- URLの強制変換ロジック（修正版） ---
+            # 1. ホスト名を [任意].phncdn.com から iv-h.phncdn.com に置換（クエリは維持）
+            final_url = re.sub(r'https://[a-z0-9-]+.phncdn.com', 'https://iv-h.phncdn.com', raw_url)
             
-            # 2. ホスト名を ev-h から iv-h に置換
-            # (もし他のサブドメインの場合も考慮して正規表現で置換)
-            final_url = re.sub(r'https://[a-z0-9-]+.phncdn.com', 'https://iv-h.phncdn.com', clean_url)
-            
-            # 3. ファイル名が index-... になっている場合 master.m3u8 に書き換え
-            if 'master.m3u8' not in final_url:
-                final_url = re.sub(r'/[^/]+\.m3u8$', '/master.m3u8', final_url)
+            # 2. ファイル名が index-... になっている場合、パス部分のみ master.m3u8 に書き換え
+            if 'master.m3u8' not in final_url.split('?')[0]:
+                # パス末尾の .m3u8 ファイル名を master.m3u8 に置換。? 以降のパラメータは保持。
+                final_url = re.sub(r'/([^/]+)\.m3u8', '/master.m3u8', final_url, count=1)
 
             return jsonify({
                 "title": info.get('title'),
@@ -77,4 +74,3 @@ def proxy_video():
 
 if __name__ == "__main__":
     app.run()
-
