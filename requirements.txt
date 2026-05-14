@@ -1,5 +1,2 @@
-fastapi
-pornhub-api
+flask
 yt-dlp
-uvicorn
-pydantic<2.0.0
