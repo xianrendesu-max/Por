@@ -1,64 +1,110 @@
-from flask import Flask, request, jsonify
-import yt_dlp
 import os
+import json
+from flask import Flask, request, jsonify
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 app = Flask(__name__)
 
-# Vercel用にappをhandlerとして定義（慣習的なものですが、Flaskオブジェクトそのままでも動作します）
-app.debug = True
-
-# ルートディレクトリにアクセスした際の確認用
-@app.route('/')
-def index():
-    return jsonify({
-        "status": "online",
-        "message": "yt-dlp JSON API for Pornhub is running",
-        "proxy": "active"
-    })
-
-@app.route('/get_info')
-def get_info():
-    # クエリパラメータから動画URLを取得
-    video_url = request.args.get('url')
-    
-    if not video_url:
-        return jsonify({"error": "Missing 'url' parameter"}), 400
-
-    # 指定されたプロキシサーバー
-    proxy_url = "http://ytproxy-siawaseok.duckdns.org:3007"
-
-    # yt-dlpのオプション設定
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'proxy': proxy_url,
-        'nocheckcertificate': True,
-        'format': 'best', # 最良の画質を選択
-        # Pornhubのブロックを回避するための偽装ヘッダー
-        'referer': 'https://www.pornhub.com/',
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'ja,en-US;q=0.7,en;q=0.3',
-        }
+def scrape_xvideos(keyword, page):
+    # Vercelのサーバーレス環境に対応したPlaywrightの起動オプション
+    # サンドボックスをオフにしないとコンテナ内で起動に失敗します
+    launch_options = {
+        "headless": True,
+        "args": [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu"
+        ]
     }
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # 情報を抽出（download=Falseでメタデータのみ取得）
-            info = ydl.extract_info(video_url, download=False)
-            
-            # 抽出した情報をJSONとして返却
-            return jsonify(info)
-            
-    except Exception as e:
-        # エラー発生時の詳細を返却
-        return jsonify({
-            "error": "Failed to extract video information",
-            "details": str(e)
-        }), 500
+    url = f"https://www.xvideos.com/?k={keyword}&p={page}"
 
-if __name__ == "__main__":
-    # Renderが指定するポート番号、または5000番で起動
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    with sync_playwright() as p:
+        # Chromiumブラウザを起動
+        browser = p.chromium.launch(**launch_options)
+        
+        # 実際のブラウザに見せかけるためのUser-Agentを設定
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page_ctx = context.new_page()
+        
+        try:
+            # タイムアウトを45秒に設定（Vercelの制限対策）
+            page_ctx.goto(url, timeout=45000, wait_until="domcontentloaded")
+            html = page_ctx.content()
+        except Exception as e:
+            browser.close()
+            return {"error": f"ページの読み込みに失敗しました: {str(e)}", "videos": []}
+            
+        browser.close()
+
+    # BeautifulSoupによるHTML解析
+    soup = BeautifulSoup(html, "html.parser")
+    video_list = []
+    
+    # xvideosの動画要素（div.mozaique）を取得
+    videos = soup.find_all("div", class_="mozaique")
+    if not videos:
+        # レイアウトが異なる場合のフォールバック
+        videos = soup.find_all("div", class_="thumb-block")
+
+    for video in videos:
+        try:
+            # タイトルとURLの抽出
+            title_tag = video.find("p", class_="title")
+            if not title_tag:
+                title_tag = video.find("a", title=True)
+                
+            if title_tag:
+                a_tag = title_tag.find("a") if title_tag.name == "p" else title_tag
+                title = a_tag.get("title") or a_tag.text.strip()
+                href = a_tag.get("href")
+                video_url = f"https://www.xvideos.com{href}" if href.startswith("/") else href
+                
+                # 再生時間、閲覧数の抽出
+                duration = "不明"
+                metadata = video.find("span", class_="duration")
+                if metadata:
+                    duration = metadata.text.strip()
+
+                video_list.append({
+                    "title": title,
+                    "url": video_url,
+                    "duration": duration
+                })
+        except Exception:
+            continue
+
+    return {"videos": video_list, "count": len(video_list)}
+
+
+@app.route("/", methods=["GET"])
+def index():
+    return jsonify({
+        "status": "running",
+        "usage": "/search?k=キーワード&p=1"
+    })
+
+
+@app.route("/search", methods=["GET"])
+def search():
+    # クエリパラメータの取得
+    keyword = request.args.get("k", default="", type=str)
+    page = request.args.get("p", default=1, type=int)
+
+    if not keyword:
+        return jsonify({"error": "キーワード 'k' は必須です。"}), 400
+
+    try:
+        result = scrape_xvideos(keyword, page)
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": f"サーバー内部エラー: {str(e)}"}), 500
+
+
+# Vercel環境用のハンドラー指定
+# Flaskオブジェクトをそのままエクスポートします
+app = app
